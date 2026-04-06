@@ -1,0 +1,66 @@
+name: DataCleaningOpenEnv
+version: "1.0.0"
+description: >
+  OpenEnv-compatible data cleaning benchmark with three tasks (orders,
+  user-merge, transactions). Agents must detect and correct nulls,
+  duplicates, type errors, format violations, outliers, referential integrity,
+  and transaction corruption.
+
+tags:
+  - openenv
+  - data-cleaning
+  - benchmark
+
+observation:
+  type: object
+  schema: Observation
+  fields:
+    task_id: "str"
+    step: "int"
+    max_steps: "int"
+    shape: "tuple[int, int]"
+    dtypes: "dict[str, str]"
+    null_counts: "dict[str, int]"
+    duplicate_count: "int"
+    error_summary: "dict[str, int]"
+    sample_rows: "list[dict]"
+    validation_report: "list[ValidationCheck]"
+    current_score: "float"
+
+action:
+  type: object
+  schema: Action
+  fields:
+    action_type: "detect_nulls|detect_duplicates|detect_type_errors|detect_format_violations|detect_outliers|profile_column|fill_nulls|drop_duplicates|cast_column|normalize_values|clip_outliers|drop_rows|rename_column|run_validation|submit"
+    column: "str | null"
+    params: "dict"
+
+reward:
+  type: float
+  range: [-1.0, 1.0]
+  description: "Per-step delta score based on weighted validation checks"
+
+tasks:
+  - id: orders
+    name: E-commerce order cleanup
+    difficulty: easy
+    max_steps: 15
+    expected_score_range: [0.65, 0.95]
+  - id: user-merge
+    name: Multi-source user profile merge
+    difficulty: medium
+    max_steps: 22
+    expected_score_range: [0.45, 0.80]
+  - id: transactions
+    name: Financial transaction audit trail
+    difficulty: hard
+    max_steps: 30
+    expected_score_range: [0.22, 0.55]
+
+endpoints:
+  base_url: "http://localhost:8000"
+  health: "GET /"
+  reset: "POST /reset"
+  step: "POST /step?task_id={task_id}"
+  state: "GET /state?task_id={task_id}"
+  tasks: "GET /tasks"
