@@ -2,21 +2,55 @@ from __future__ import annotations
 
 import json
 import os
-
-import requests
+import sys
+import time
+from urllib import error, parse, request
 
 ENV_URL = os.environ.get("ENV_URL", "http://localhost:8000")
 TASKS = ["orders", "user-merge", "transactions"]
 
 
+class EnvClientError(RuntimeError):
+    """Raised when the benchmark env cannot be reached or returns invalid data."""
+
+
 def call_env(endpoint: str, method: str = "POST", data: dict | None = None, params: dict | None = None) -> dict:
-    url = f"{ENV_URL}/{endpoint}"
+    url = f"{ENV_URL}/{endpoint}" if endpoint else ENV_URL
+    if params:
+        query = parse.urlencode(params)
+        separator = "&" if "?" in url else "?"
+        url = f"{url}{separator}{query}"
+
+    body: bytes | None = None
+    headers = {"Accept": "application/json"}
     if method == "POST":
-        response = requests.post(url, json=data, params=params, timeout=45)
-    else:
-        response = requests.get(url, params=params, timeout=45)
-    response.raise_for_status()
-    return response.json()
+        body = json.dumps(data or {}).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+
+    req = request.Request(url=url, data=body, method=method, headers=headers)
+    try:
+        with request.urlopen(req, timeout=45) as response:
+            raw = response.read().decode("utf-8")
+    except (error.HTTPError, error.URLError, TimeoutError) as exc:
+        raise EnvClientError(f"Request failed for {method} {url}: {exc}") from exc
+
+    try:
+        return json.loads(raw)
+    except ValueError as exc:
+        raise EnvClientError(f"Invalid JSON from {method} {url}") from exc
+
+
+def wait_for_env(max_retries: int = 8, base_delay: float = 1.0) -> bool:
+    for attempt in range(1, max_retries + 1):
+        try:
+            call_env("", method="GET")
+            return True
+        except EnvClientError as exc:
+            if attempt == max_retries:
+                print(f"[warn] env unreachable at {ENV_URL}: {exc}", file=sys.stderr)
+                return False
+            time.sleep(base_delay * attempt)
+    return False
 
 
 def pick_action(task_id: str, obs: dict) -> dict:
@@ -68,27 +102,41 @@ def pick_action(task_id: str, obs: dict) -> dict:
 
 
 def run_task(task_id: str) -> float:
-    obs = call_env("reset", data={"task_id": task_id})
-    done = False
-    final_score = float(obs["current_score"])
-    for _ in range(obs["max_steps"]):
-        if done:
-            break
-        if obs["current_score"] >= 0.99:
-            break
-        action = pick_action(task_id, obs)
-        result = call_env("step", data=action, params={"task_id": task_id})
-        obs = result["observation"]
-        done = bool(result["done"])
-        final_score = float(result["info"].get("final_score", obs["current_score"]))
+    try:
+        obs = call_env("reset", data={"task_id": task_id})
+        done = False
+        final_score = float(obs.get("current_score", 0.0))
 
-    if not done:
-        result = call_env("step", data={"action_type": "submit", "params": {}}, params={"task_id": task_id})
-        final_score = float(result["info"].get("final_score", obs["current_score"]))
+        for _ in range(int(obs.get("max_steps", 0))):
+            if done:
+                break
+            if float(obs.get("current_score", 0.0)) >= 0.99:
+                break
 
-    return final_score
+            action = pick_action(task_id, obs)
+            result = call_env("step", data=action, params={"task_id": task_id})
+            obs = result.get("observation", {})
+            done = bool(result.get("done", False))
+            info = result.get("info", {})
+            final_score = float(info.get("final_score", obs.get("current_score", final_score)))
+
+        if not done:
+            result = call_env("step", data={"action_type": "submit", "params": {}}, params={"task_id": task_id})
+            info = result.get("info", {})
+            final_score = float(info.get("final_score", obs.get("current_score", final_score)))
+
+        return final_score
+    except (EnvClientError, KeyError, TypeError, ValueError) as exc:
+        print(f"[warn] task '{task_id}' failed: {exc}", file=sys.stderr)
+        return 0.0
 
 
 if __name__ == "__main__":
+    if not wait_for_env():
+        fallback_scores = {task: 0.0 for task in TASKS}
+        print(json.dumps({"scores": fallback_scores, "mean": 0.0, "status": "env_unreachable"}, indent=2))
+        raise SystemExit(0)
+
     scores = {task: run_task(task) for task in TASKS}
-    print(json.dumps({"scores": scores, "mean": round(sum(scores.values()) / len(scores), 4)}, indent=2))
+    mean_score = round(sum(scores.values()) / len(scores), 4) if scores else 0.0
+    print(json.dumps({"scores": scores, "mean": mean_score}, indent=2))
