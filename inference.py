@@ -31,7 +31,7 @@ def call_env(endpoint: str, method: str = "POST", data: dict | None = None, para
     try:
         with request.urlopen(req, timeout=45) as response:
             raw = response.read().decode("utf-8")
-    except (error.HTTPError, error.URLError, TimeoutError) as exc:
+    except (error.HTTPError, error.URLError, TimeoutError, OSError) as exc:
         raise EnvClientError(f"Request failed for {method} {url}: {exc}") from exc
 
     try:
@@ -129,14 +129,24 @@ def run_task(task_id: str) -> float:
     except (EnvClientError, KeyError, TypeError, ValueError) as exc:
         print(f"[warn] task '{task_id}' failed: {exc}", file=sys.stderr)
         return 0.0
+    except Exception as exc:
+        print(f"[warn] task '{task_id}' failed unexpectedly: {exc}", file=sys.stderr)
+        return 0.0
 
 
 if __name__ == "__main__":
-    if not wait_for_env():
-        fallback_scores = {task: 0.0 for task in TASKS}
-        print(json.dumps({"scores": fallback_scores, "mean": 0.0, "status": "env_unreachable"}, indent=2))
-        raise SystemExit(0)
+    try:
+        if not wait_for_env():
+            fallback_scores = {task: 0.0 for task in TASKS}
+            print(json.dumps({"scores": fallback_scores, "mean": 0.0, "status": "env_unreachable"}, indent=2))
+            raise SystemExit(0)
 
-    scores = {task: run_task(task) for task in TASKS}
-    mean_score = round(sum(scores.values()) / len(scores), 4) if scores else 0.0
-    print(json.dumps({"scores": scores, "mean": mean_score}, indent=2))
+        scores = {task: run_task(task) for task in TASKS}
+        mean_score = round(sum(scores.values()) / len(scores), 4) if scores else 0.0
+        print(json.dumps({"scores": scores, "mean": mean_score}, indent=2))
+    except Exception as exc:
+        # Never crash the benchmark harness; emit safe fallback payload.
+        print(f"[warn] inference failed unexpectedly: {exc}", file=sys.stderr)
+        fallback_scores = {task: 0.0 for task in TASKS}
+        print(json.dumps({"scores": fallback_scores, "mean": 0.0, "status": "inference_error"}, indent=2))
+        raise SystemExit(0)
